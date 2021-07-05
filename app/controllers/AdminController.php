@@ -8,6 +8,11 @@ class AdminController extends BaseController {
 		Session::put("nav-active", "user-console");
 	}
 
+	public function reRoute(){
+		$data["djangoURL"] = Config::get('pga_config.portal')['airavata-django-url'];
+		return View::make("admin/redirect-django", $data);
+	}
+
 	public function dashboard(){
         $userInfo = array();
         $data = array();
@@ -121,7 +126,7 @@ class AdminController extends BaseController {
 		$gatewaysInfo = CRUtilities::getAllGatewayProfilesData();
 		$gateways = $gatewaysInfo["gateways"];
 		usort($gateways, array($this, "cmp"));
-		$tokens = AdminUtilities::get_all_ssh_tokens();
+		$tokens = AdminUtilities::get_all_ssh_tokens_with_description();
 		$pwdTokens = AdminUtilities::get_all_pwd_tokens();
 		$srData = SRUtilities::getEditSRData();
 		$crData = CRUtilities::getEditCRData();
@@ -173,6 +178,29 @@ class AdminController extends BaseController {
 
 	public function updateGateway(){
 
+        $rules = array(
+            "password" => "min:6|max:48|regex:/^.*(?=.*[a-z])(?=.*[A-Z])(?=.*[0-9])(?=.*[@!$#*&]).*$/",
+            "confirm_password" => "same:password",
+            "email" => "email",
+        );
+        $messages = array(
+            'password.regex' => 'Password needs to contain at least (a) One lower case letter (b) One Upper case letter and (c) One number (d) One of the following special characters - !@#$&*',
+        );
+        $checkValidation = array();
+        $checkValidation["password"] = Input::get("gatewayAdminPassword");
+        $checkValidation["confirm_password"] = Input::get("gatewayAdminPasswordConfirm");
+        $checkValidation["email"] = Input::get("gatewayAdminEmail");
+
+        $validator = Validator::make( $checkValidation, $rules, $messages);
+        if ($validator->fails()) {
+            if(Request::ajax()){
+                return json_encode(array("errors" => true, "validationMessages" => $validator->messages()));
+            } else {
+                Session::put("message", "An error has occurred while updating the Gateway: " + $validator->messages());
+                return Redirect::back();
+            }
+        }
+
 	    $gateway = TenantProfileService::getGateway( Session::get('authz-token'), Input::get("internal_gateway_id"));
 		$returnVal = AdminUtilities::update_gateway( Input::get("internal_gateway_id"), Input::except("oauthClientId","oauthClientSecret"));
 		if( Request::ajax()){
@@ -184,10 +212,10 @@ class AdminController extends BaseController {
                     Session::put("successMessages", "Tenant has been created successfully!");
                 else
                     Session::put("successMessages", "Gateway has been updated successfully!");
-                return json_encode(AdminUtilities::get_gateway(Input::get("internal_gateway_id")));
+                return json_encode(array("errors" => false, "gateway" => AdminUtilities::get_gateway(Input::get("internal_gateway_id"))));
             }
 			else {
-                return $returnVal; // anything other than positive update result
+                return json_encode(array("errors" => true)); // anything other than positive update result
             }
 		}
 		else{
@@ -322,7 +350,7 @@ class AdminController extends BaseController {
 
 	public function credentialStoreView(){
         Session::put("admin-nav", "credential-store");
-        $tokens = AdminUtilities::get_all_ssh_tokens();
+        $tokens = AdminUtilities::get_all_ssh_tokens_with_description();
 		$pwdTokens = AdminUtilities::get_all_pwd_tokens();
         //var_dump( $tokens); exit;
 		return View::make("admin/manage-credentials", array("tokens" => $tokens , "pwdTokens" => $pwdTokens) );
@@ -345,7 +373,9 @@ class AdminController extends BaseController {
 		$mail->Port = intval(Config::get('pga_config.portal')['portal-smtp-server-port']);
 
 		$mail->From = Config::get('pga_config.portal')['portal-email-username'];
-		$mail->FromName = "Gateway Portal: " . $_SERVER['SERVER_NAME'];
+        $gatewayURL = $_SERVER['SERVER_NAME'];
+        $portalTitle = Config::get('pga_config.portal')['portal-title'];
+        $mail->FromName = "$portalTitle ($gatewayURL)";
 
 		foreach($recipients as $recipient){
 			$mail->addAddress($recipient);
@@ -398,32 +428,32 @@ class AdminController extends BaseController {
     }
 
 	public function createSSH(){
-		$newToken = AdminUtilities::create_ssh_token_for_gateway(null);
-		$pubkey = AdminUtilities::get_pubkey_from_token( $newToken);
-		return Response::json( array( "token" => $newToken, "pubkey" => $pubkey));
-
+        $description = Input::get("description");
+        $newToken = AdminUtilities::create_ssh_token_for_gateway($description);
+        return Redirect::to("admin/dashboard/credential-store")->with("message", "SSH Key was successfully created");
 	}
 
 	public function createPWD(){
 		AdminUtilities::create_pwd_token(Input::all());
-		return $this->credentialStoreView();
+		return Redirect::to("admin/dashboard/credential-store")->with("message", "Password Credential was successfully created");
+
 	}
 
 	public function removeSSH(){
 		$removeToken = Input::get("token");
 		if( AdminUtilities::remove_ssh_token( $removeToken) )
-			return 1;
+            return Redirect::to("admin/dashboard/credential-store")->with("message", "SSH Key was successfully deleted");
 		else
-			return 0;
+            return Redirect::to("admin/dashboard/credential-store")->with("error-message", "Unable to delete SSH Key");
 
 	}
 
 	public function removePWD(){
 		$removeToken = Input::get("token");
 		if( AdminUtilities::remove_pwd_token( $removeToken) )
-			return 1;
+			return Redirect::to("admin/dashboard/credential-store")->with("message", "Password Credential was successfully deleted");
 		else
-			return 0;
+			return Redirect::to("admin/dashboard/credential-store")->with("error-message", "Unable to delete Password Credential"); 
 
 	}
 
@@ -440,7 +470,7 @@ class AdminController extends BaseController {
 		$inputs = Input::all();
 
 		$rules = array(
-            "password" => "required|min:6|max:48|regex:/^.*(?=.*[a-z])(?=.*[A-Z])(?=.*[0-9])(?=.*[@!$#*]).*$/",
+            "password" => "required|min:6|max:48|regex:/^.*(?=.*[a-z])(?=.*[A-Z])(?=.*[0-9])(?=.*[@!$#*&]).*$/",
             "confirm_password" => "required|same:password",
             "email" => "required|email",
         );
@@ -524,7 +554,7 @@ class AdminController extends BaseController {
 		
 		$rules = array(
             "username" => "required",
-            "password" => "required|min:6|max:48|regex:/^.*(?=.*[a-z])(?=.*[A-Z])(?=.*[0-9])(?=.*[@!$#*]).*$/",
+            "password" => "required|min:6|max:48|regex:/^.*(?=.*[a-z])(?=.*[A-Z])(?=.*[0-9])(?=.*[@!$#*&]).*$/",
             "confirm_password" => "required|same:password",
             "email" => "required|email",
         );

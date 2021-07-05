@@ -74,7 +74,7 @@ return array(
                 // http://www.keycloak.org/docs/2.5/server_admin/topics/identity-broker/suggested.html
                 'oauth-authorize-url-extra-params' => 'kc_idp_hint=oidc',
                 // Optional
-                'logo': '/assets/path_to_image.png'
+                'logo' => '/assets/path_to_image.png'
             ],
         ],
 
@@ -180,6 +180,21 @@ return array(
         'wall-time-limit' => '30',
 
         /**
+         * Max node count
+         */
+        'max-node-count' => '4',
+
+        /**
+         * Max total core count
+         */
+        'max-total-cpu-count' => '96',
+
+        /**
+         * Max wall time limit
+         */
+        'max-wall-time-limit' => '120',
+
+        /**
          * Enable app-catalog cache
          */
         'enable-app-catalog-cache' => true,
@@ -197,7 +212,12 @@ return array(
          /**
           * Data Sharing enabled
           */
-          'data-sharing-enabled' => false
+          'data-sharing-enabled' => false,
+
+        /**
+         * Group Resource Profile ID to use when submitting experiments
+         */
+        'group-resource-profile-id' => '',
     ],
 
     /**
@@ -256,7 +276,17 @@ return array(
          * Set this to true if theme has set links to login
          */
         'theme-based-login-links-configured' => false,
-        
+
+        /**
+         * Set the URL of the new Django portal for re-routing
+         */
+        'airavata-django-url' => "https://django.seagrid.org/",
+
+        /**
+         * Set to true to enable reroute to the new Django portal
+         */
+        'reroute-to-django' => true,
+
         /**
          * Set JIRA Issue Collector scripts here.
          */

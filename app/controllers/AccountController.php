@@ -2,7 +2,7 @@
 
 class AccountController extends BaseController
 {
-    const PASSWORD_VALIDATION = "required|min:6|max:48|regex:/^.*(?=.*[a-z])(?=.*[A-Z])(?=.*[0-9])(?=.*[@!$#*]).*$/";
+    const PASSWORD_VALIDATION = "required|min:6|max:48|regex:/^.*(?=.*[a-z])(?=.*[A-Z])(?=.*[0-9])(?=.*[@!$#*&]).*$/";
     const PASSWORD_VALIDATION_MESSAGE = "Password needs to contain at least (a) One lower case letter (b) One Upper case letter and (c) One number (d) One of the following special characters - !@#$&*";
 
     public function __construct()
@@ -30,6 +30,7 @@ class AccountController extends BaseController
             "password" => self::PASSWORD_VALIDATION,
             "confirm_password" => "required|same:password",
             "email" => "required|email",
+            "confirm_email" => "required|same:email",
         );
 
         $messages = array(
@@ -40,7 +41,7 @@ class AccountController extends BaseController
         $validator = Validator::make(Input::all(), $rules, $messages);
         if ($validator->fails()) {
             return Redirect::to("create")
-                ->withInput(Input::except('password', 'password_confirm'))
+                ->withInput(Input::except('password', 'confirm_password', 'email', 'confirm_email'))
                 ->withErrors($validator);
         }
 
@@ -52,7 +53,7 @@ class AccountController extends BaseController
 
         if (Keycloak::usernameExists($username)) {
             return Redirect::to("create")
-                ->withInput(Input::except('password', 'password_confirm'))
+                ->withInput(Input::except('password', 'confirm_password'))
                 ->with("username_exists", true);
         } else {
 
@@ -79,6 +80,7 @@ class AccountController extends BaseController
         $auth_password_option = CommonUtilities::getAuthPasswordOption();
         // Support for many external identity providers (authorization code auth flow)
         $auth_code_options = CommonUtilities::getAuthCodeOptions();
+        $has_auth_code_and_password_options = $auth_password_option != null && count($auth_code_options) > 0;
 
         // If no username/password option and only one external identity
         // provider, just redirect immediately
@@ -88,6 +90,7 @@ class AccountController extends BaseController
             return View::make('account/login', array(
                 "auth_password_option" => $auth_password_option,
                 "auth_code_options" => $auth_code_options,
+                "has_auth_code_and_password_options" => $has_auth_code_and_password_options,
             ));
         }
     }
@@ -98,6 +101,7 @@ class AccountController extends BaseController
         $auth_password_option = CommonUtilities::getAuthPasswordOption();
         // Support for many external identity providers (authorization code auth flow)
         $auth_code_options = CommonUtilities::getAuthCodeOptions();
+        $has_auth_code_and_password_options = $auth_password_option != null && count($auth_code_options) > 0;
 
         // If no username/password option and only one external identity
         // provider, just redirect immediately
@@ -107,6 +111,7 @@ class AccountController extends BaseController
             return View::make('account/login-desktop', array(
                 "auth_password_option" => $auth_password_option,
                 "auth_code_options" => $auth_code_options,
+                "has_auth_code_and_password_options" => $has_auth_code_and_password_options,
             ));
         }
     }
@@ -148,27 +153,41 @@ class AccountController extends BaseController
             Session::put('oauth-expiration-time',$expirationTime);
 
             Session::put("roles", $userRoles);
-            if (in_array(Config::get('pga_config.wsis')['admin-role-name'], $userRoles)) {
+            // AIRAVATA-3086: get gateway groups and get the groups this user is a member of
+            $gatewayGroups = Airavata::getGatewayGroups($authzToken);
+            $groupMemberships = GroupManagerService::getAllGroupsUserBelongs(
+                $authzToken, $username . "@" . Config::get('pga_config.airavata')['gateway-id']);
+            $get_group_id = function($group) {
+                return $group->id;
+            };
+            $userGroupIds = array_map($get_group_id, $groupMemberships);
+            // AIRAVATA-3086: check if user is in Admins group
+            if (in_array($gatewayGroups->adminsGroupId, $userGroupIds)) {
                 Session::put("admin", true);
             }
-            if (in_array(Config::get('pga_config.wsis')['read-only-admin-role-name'], $userRoles)) {
+            // AIRAVATA-3086: check if user is in Read Only Admins group
+            if (in_array($gatewayGroups->readOnlyAdminsGroupId, $userGroupIds)) {
                 Session::put("authorized-user", true);
                 Session::put("admin-read-only", true);
             }
-            if (in_array(Config::get('pga_config.wsis')['user-role-name'], $userRoles)) {
+            // AIRAVATA-3086: check if user is in default Gateway Users group
+            if (in_array($gatewayGroups->defaultGatewayUsersGroupId, $userGroupIds)) {
                 Session::put("authorized-user", true);
             }
+            // AIRAVATA-3086: leave this for scigap/super-admin portal
             //gateway-provider-code
             if (in_array("gateway-provider", $userRoles)) {
                 Session::put("gateway-provider", true);
             }
+            // AIRAVATA-3086: for scigap/super-admin portal, keep same role-based rules
             //only for super admin
-            if(  Config::get('pga_config.portal')['super-admin-portal'] == true && Session::has("admin")){
+            if(  Config::get('pga_config.portal')['super-admin-portal'] == true && in_array(Config::get('pga_config.wsis')['admin-role-name'], $userRoles)) {
                 Session::put("super-admin", true);
             }
             CommonUtilities::store_id_in_session($username);
             Session::put("gateway_id", Config::get('pga_config.airavata')['gateway-id']);
 
+            UserProfileUtilities::initialize_user_profile();
             if(Session::has("admin") || Session::has("admin-read-only") || Session::has("authorized-user") || Session::has("gateway-provider")){
                 return $this->initializeWithAiravata($username, $userEmail, $firstName, $lastName, $accessToken,
                     $refreshToken, $expirationTime);
@@ -178,6 +197,13 @@ class AccountController extends BaseController
                 . "&refresh_code=" . $refreshToken . "&valid_time=" . $expirationTime);
         }
 
+    }
+
+    public function apiLoginSubmit() {
+        $username = strtolower(Input::get("username"));
+        $password = Input::get("password");
+        $response = Keycloak::authenticate($username, $password);
+        return Response::json($response);
     }
 
     public function oauthCallback()
@@ -225,27 +251,42 @@ class AccountController extends BaseController
         Session::put('oauth-expiration-time',$expirationTime);
 
         Session::put("roles", $userRoles);
-        if (in_array(Config::get('pga_config.wsis')['admin-role-name'], $userRoles)) {
+        // AIRAVATA-3086: get gateway groups and get the groups this user is a member of
+        $gatewayGroups = Airavata::getGatewayGroups($authzToken);
+        $groupMemberships = GroupManagerService::getAllGroupsUserBelongs(
+            $authzToken, $username . "@" . Config::get('pga_config.airavata')['gateway-id']);
+        $get_group_id = function($group) {
+            return $group->id;
+        };
+        $userGroupIds = array_map($get_group_id, $groupMemberships);
+        // AIRAVATA-3086: check if user is in Admins group
+        if (in_array($gatewayGroups->adminsGroupId, $userGroupIds)) {
             Session::put("admin", true);
         }
-        if (in_array(Config::get('pga_config.wsis')['read-only-admin-role-name'], $userRoles)) {
+        // AIRAVATA-3086: check if user is in Read Only Admins group
+        if (in_array($gatewayGroups->readOnlyAdminsGroupId, $userGroupIds)) {
+            Session::put("authorized-user", true);
             Session::put("admin-read-only", true);
         }
-        if (in_array(Config::get('pga_config.wsis')['user-role-name'], $userRoles)) {
+        // AIRAVATA-3086: check if user is in default Gateway Users group
+        if (in_array($gatewayGroups->defaultGatewayUsersGroupId, $userGroupIds)) {
             Session::put("authorized-user", true);
         }
+        // AIRAVATA-3086: leave this for scigap/super-admin portal
         //gateway-provider-code
         if (in_array("gateway-provider", $userRoles)) {
             Session::put("gateway-provider", true);
         }
+        // AIRAVATA-3086: for scigap/super-admin portal, keep same role-based rules
         //only for super admin
-        if(  Config::get('pga_config.portal')['super-admin-portal'] == true && Session::has("admin")){
+        if(  Config::get('pga_config.portal')['super-admin-portal'] == true && in_array(Config::get('pga_config.wsis')['admin-role-name'], $userRoles)) {
             Session::put("super-admin", true);
         }
 
         CommonUtilities::store_id_in_session($username);
         Session::put("gateway_id", Config::get('pga_config.airavata')['gateway-id']);
 
+        UserProfileUtilities::initialize_user_profile();
         if(Session::has("admin") || Session::has("admin-read-only") || Session::has("authorized-user") || Session::has("gateway-provider")){
             return $this->initializeWithAiravata($username, $userEmail, $firstName, $lastName, $accessToken, $refreshToken, $expirationTime);
         }
@@ -273,10 +314,6 @@ class AccountController extends BaseController
             return Redirect::to("home")->with("airavata-down", true);
         }
 
-        // Create basic user profile if it doesn't exist
-        if (!UserProfileUtilities::does_user_profile_exist($username)) {
-            UserProfileUtilities::create_basic_user_profile($username, $userEmail, $firstName, $lastName);
-        }
         $userProfile = UserProfileUtilities::get_user_profile($username);
         Session::put('user-profile', $userProfile);
 
@@ -294,12 +331,25 @@ class AccountController extends BaseController
             umask($old_umask);
         }
 
+        // Must create the UserResourceProfile before we can add auto provisioned accounts to it
+        $user_resource_profile = URPUtilities::get_or_create_user_resource_profile();
+        $auto_provisioned_accounts = URPUtilities::setup_auto_provisioned_accounts();
+        // Log::debug("auto_provisioned_accounts", array($auto_provisioned_accounts));
+
         if(Session::has("admin") || Session::has("admin-read-only") || Session::has("gateway-provider")){
-            return Redirect::to("admin/dashboard". "?status=ok&code=".$accessToken . "&username=".$username
+            $response = Redirect::to("admin/dashboard". "?status=ok&code=".$accessToken . "&username=".$username
                 . "&refresh_code=" . $refreshToken . "&valid_time=" . $validTime);
+            if (!empty($auto_provisioned_accounts)) {
+                $response = $response->with("auto_provisioned_accounts", $auto_provisioned_accounts);
+            }
+            return $response;
         }else{
-            return Redirect::to("account/dashboard". "?status=ok&code=".$accessToken ."&username=".$username
+            $response = Redirect::to("account/dashboard". "?status=ok&code=".$accessToken ."&username=".$username
                 . "&refresh_code=" . $refreshToken . "&valid_time=" . $validTime);
+            if (!empty($auto_provisioned_accounts)) {
+                $response = $response->with("auto_provisioned_accounts", $auto_provisioned_accounts);
+            }
+            return $response;
         }
     }
 
@@ -334,7 +384,6 @@ class AccountController extends BaseController
             return Redirect::to("login");
         }
 
-        $userRoles = Session::get("roles");
         if (Session::has("user-profile")) {
             $userEmail = Session::get("user-profile")->emails[0];
         } else {
@@ -363,24 +412,29 @@ class AccountController extends BaseController
             return View::make("home");
         }else{
             try{
-                $verified = EmailUtilities::verifyEmailVerification($username, $code);
-                if (!$verified){
-                    $user_profile = Keycloak::getUserProfile($username);
-                    EmailUtilities::sendVerifyEmailAccount($username,
-                        $user_profile["firstname"], $user_profile["lastname"], $user_profile["email"]);
-                    CommonUtilities::print_error_message("Account confirmation "
-                        . "failed! We're sending another confirmation email. "
-                        . "Please click the link in the confirmation email that "
-                        . "you should be receiving soon.");
-                    return View::make("home");
-                }
-                $result = IamAdminServicesUtilities::enableUser($username);
-                if($result){
-                    $this->sendAccountCreationNotification2Admin($username);
-                    return Redirect::to("login")->with("account-created-success", "Your account has been successfully created. Please log in now.");
-                }else{
-                    CommonUtilities::print_error_message("Account confirmation failed! Please contact the Gateway Admin");
-                    return View::make("home");
+                $enabled = IamAdminServicesUtilities::isUserEnabled($username);
+                if ($enabled) {
+                    return Redirect::to("login")->with("account-created-success", "Your account has already been successfully created. Please log in now.");
+                } else {
+                    $verified = EmailUtilities::verifyEmailVerification($username, $code);
+                    if (!$verified){
+                        $user_profile = Keycloak::getUserProfile($username);
+                        EmailUtilities::sendVerifyEmailAccount($username,
+                            $user_profile["firstname"], $user_profile["lastname"], $user_profile["email"]);
+                        CommonUtilities::print_error_message("Account confirmation "
+                            . "failed! We're sending another confirmation email. "
+                            . "Please click the link in the confirmation email that "
+                            . "you should be receiving soon.");
+                        return View::make("home");
+                    }
+                    $result = IamAdminServicesUtilities::enableUser($username);
+                    if($result){
+                        $this->sendAccountCreationNotification2Admin($username);
+                        return Redirect::to("login")->with("account-created-success", "Your account has been successfully created. Please log in now.");
+                    }else{
+                        CommonUtilities::print_error_message("Account confirmation failed! Please contact the Gateway Admin");
+                        return View::make("home");
+                    }
                 }
             }catch (Exception $e){
                 CommonUtilities::print_error_message("Account confirmation failed! Please contact the Gateway Admin");
@@ -408,7 +462,9 @@ class AccountController extends BaseController
         $mail->Port = intval(Config::get('pga_config.portal')['portal-smtp-server-port']);
 
         $mail->From = Config::get('pga_config.portal')['portal-email-username'];
-        $mail->FromName = "Airavata PHP Gateway";
+        $gatewayURL = $_SERVER['SERVER_NAME'];
+        $portalTitle = Config::get('pga_config.portal')['portal-title'];
+        $mail->FromName = "$portalTitle ($gatewayURL)";
 
         $recipients = Config::get('pga_config.portal')['admin-emails'];
         foreach($recipients as $recipient){

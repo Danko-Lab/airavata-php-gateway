@@ -3,7 +3,6 @@
 use Airavata\API\Error\AuthorizationException;
 use Airavata\API\Error\ExperimentNotFoundException;
 use Airavata\Model\Status\JobState;
-use Airavata\Model\Group\ResourceType;
 
 class ExperimentController extends BaseController
 {
@@ -55,7 +54,6 @@ class ExperimentController extends BaseController
                 "wallTimeLimit" => $wallTimeLimit
             );
 
-
             $experimentInputs = array(
                 "disabled" => ' disabled',
                 "experimentName" => $_POST['experiment-name'],
@@ -73,11 +71,11 @@ class ExperimentController extends BaseController
             );
 
             if(Config::get('pga_config.airavata')["data-sharing-enabled"]){
-                $users = SharingUtilities::getProfilesForSharedUsers($_POST['project'], ResourceType::PROJECT);
+                $users = SharingUtilities::getProfilesForSharedUsers($_POST['project']);
                 $owner = array();
 
                 $projectOwner = array();
-                $sharedProjectOwner = SharingUtilities::getSharedResourceOwner($_POST['project'], ResourceType::PROJECT);
+                $sharedProjectOwner = SharingUtilities::getSharedResourceOwner($_POST['project']);
                 if (Session::get("username") !== $sharedProjectOwner) {
                     $projectOwner[$sharedProjectOwner] = $users[$sharedProjectOwner];
                     $users = array_diff_key($users, $projectOwner);
@@ -94,7 +92,17 @@ class ExperimentController extends BaseController
 
         } else if (isset($_POST['save']) || isset($_POST['launch'])) {
             try {
-                $expId = ExperimentUtilities::create_experiment();
+                $computeResourceId = Input::get("compute-resource");
+                //Validate entered queue details
+                $queueValues = array("queueName" => Input::get("queue-name"),
+                    "nodeCount" => Input::get("node-count"),
+                    "cpuCount" => Input::get("cpu-count"),
+                    "wallTimeLimit" => Input::get("walltime-count")
+                );
+                if($this->validateQueueData($computeResourceId, $queueValues))
+                    $expId = ExperimentUtilities::create_experiment();
+                else
+                    return Redirect::to("experiment/create")->with("error-message", "Validate the number of nodes, CPUs and the wall time limit");
             } catch (Exception $ex) {
                 Log::error("Failed to create experiment!");
                 Log::error($ex);
@@ -153,7 +161,7 @@ class ExperimentController extends BaseController
 
         $project = null;
         if(Config::get('pga_config.airavata')["data-sharing-enabled"]){
-            if (SharingUtilities::userCanRead(Session::get("username"), $experiment->projectId, ResourceType::PROJECT)) {
+            if (SharingUtilities::userCanRead(Session::get("username"), $experiment->projectId)) {
                 $project = ProjectUtilities::get_project($experiment->projectId);
             }
         } elseif ($experiment->userName == Session::get("username")){
@@ -167,8 +175,8 @@ class ExperimentController extends BaseController
         $jobDetails = ExperimentUtilities::get_job_details($experiment->experimentId);
 //            var_dump( $jobDetails); exit;
         foreach( $jobDetails as $index => $jobDetail){
-            if(isset($jobDetail->jobStatuses)){
-                  $jobDetails[ $index]->jobStatuses[0]->jobStateName = JobState::$__names[$jobDetail->jobStatuses[0]->jobState];
+            if(isset($jobDetail->jobStatuses) and !empty($jobDetail->jobStatuses)){
+                  ExperimentUtilities::latestStatus($jobDetails[$index]->jobStatuses)->jobStateName = JobState::$__names[ExperimentUtilities::latestStatus($jobDetail->jobStatuses)->jobState];
             }
             else{
                 $jobDetails[ $index]->jobStatuses = [new stdClass()];
@@ -189,9 +197,9 @@ class ExperimentController extends BaseController
             "writeableProjects" => $writeableProjects
         );
         if(Config::get('pga_config.airavata')["data-sharing-enabled"]){
-            $users = SharingUtilities::getProfilesForSharedUsers(Input::get("expId"), ResourceType::EXPERIMENT);
-            $sharedExperimentOwner = SharingUtilities::getSharedResourceOwner($experiment->experimentId, ResourceType::EXPERIMENT);
-            $sharedProjectOwner = SharingUtilities::getSharedResourceOwner($experiment->projectId, ResourceType::PROJECT);
+            $users = SharingUtilities::getProfilesForSharedUsers(Input::get("expId"));
+            $sharedExperimentOwner = SharingUtilities::getSharedResourceOwner($experiment->experimentId);
+            $sharedProjectOwner = SharingUtilities::getSharedResourceOwner($experiment->projectId);
 
             $owner = array();
             $projectOwner = array();
@@ -210,7 +218,7 @@ class ExperimentController extends BaseController
             // and the experiment isn't editable. If the experiment is
             // editable, the sharing can be edited on the edit page.
             $canEditSharing = (Session::get("username") === $sharedExperimentOwner) && !$expVal["editable"];
-            $data['can_write'] = SharingUtilities::userCanWrite(Session::get("username"), $experiment->experimentId, ResourceType::EXPERIMENT);
+            $data['can_write'] = SharingUtilities::userCanWrite(Session::get("username"), $experiment->experimentId);
             $data["users"] = json_encode($users);
             $data["owner"] = json_encode($owner);
             $data["projectOwner"] = json_encode($projectOwner);
@@ -318,8 +326,9 @@ class ExperimentController extends BaseController
 
         $computeResources = CRUtilities::create_compute_resources_select($experiment->executionId, $expVal['scheduling']->resourceHostId);
 
-        $userComputeResourcePreferences = URPUtilities::get_all_user_compute_resource_prefs();
+        $userComputeResourcePreferences = URPUtilities::get_all_validated_user_compute_resource_prefs();
         $userHasComputeResourcePreference = array_key_exists($expVal['scheduling']->resourceHostId, $userComputeResourcePreferences);
+        $batchQueues = ExperimentUtilities::getQueueDatafromResourceId($computeResourceId);
 
         $experimentInputs = array(
             "disabled" => ' ',
@@ -338,14 +347,15 @@ class ExperimentController extends BaseController
             'project' => $experiment->projectId,
             'expVal' => $expVal,
             'cloning' => true,
-            'advancedOptions' => Config::get('pga_config.airavata')["advanced-experiment-options"]
+            'advancedOptions' => Config::get('pga_config.airavata')["advanced-experiment-options"],
+            'batchQueues' => $batchQueues
         );
 
         if(Config::get('pga_config.airavata')["data-sharing-enabled"]){
-            if (SharingUtilities::userCanWrite(Session::get("username"), $_GET['expId'], ResourceType::EXPERIMENT) === true) {
-                $users = SharingUtilities::getProfilesForSharedUsers($_GET['expId'], ResourceType::EXPERIMENT);
-                $sharedExperimentOwner = SharingUtilities::getSharedResourceOwner($experiment->experimentId, ResourceType::EXPERIMENT);
-                $sharedProjectOwner = SharingUtilities::getSharedResourceOwner($experiment->projectId, ResourceType::PROJECT);
+            if (SharingUtilities::userCanWrite(Session::get("username"), $_GET['expId']) === true) {
+                $users = SharingUtilities::getProfilesForSharedUsers($_GET['expId']);
+                $sharedExperimentOwner = SharingUtilities::getSharedResourceOwner($experiment->experimentId);
+                $sharedProjectOwner = SharingUtilities::getSharedResourceOwner($experiment->projectId);
 
                 $owner = array();
                 $projectOwner = array();
@@ -387,6 +397,7 @@ class ExperimentController extends BaseController
             $cloneId = ExperimentUtilities::clone_experiment(Input::get('expId'), Input::get('projectId'));
             return Redirect::to('experiment/edit?expId=' . urlencode($cloneId));
         }catch (Exception $ex){
+            Log::error($ex);
             return Redirect::to("experiment/summary?expId=" . urlencode(Input::get('expId')))
                 ->with("cloning-error", "Failed to clone experiment: " . $ex->getMessage());
         }
@@ -396,7 +407,19 @@ class ExperimentController extends BaseController
     {
         $experiment = ExperimentUtilities::get_experiment(Input::get('expId')); // update local experiment variable
         try {
-            $updatedExperiment = ExperimentUtilities::apply_changes_to_experiment($experiment, Input::all());
+            $computeResourceId = Input::get("compute-resource");
+            //Validate entered queue details
+            $queueValues = array("queueName" => Input::get("queue-name"),
+                "nodeCount" => Input::get("node-count"),
+                "cpuCount" => Input::get("cpu-count"),
+                "wallTimeLimit" => Input::get("walltime-count")
+            );
+            if($this->validateQueueData($computeResourceId, $queueValues)) {
+                $updatedExperiment = ExperimentUtilities::apply_changes_to_experiment($experiment, Input::all());
+            } else {
+                $errMessage = "Validate the number of nodes, CPUs and the wall time limit";
+                return Redirect::to("experiment/edit?expId=" . urlencode(Input::get('expId')))->with("error-message", $errMessage);
+            }
         } catch (Exception $ex) {
             $errMessage = "Failed to update experiment: " . $ex->getMessage();
             Log::error($errMessage);
@@ -405,7 +428,7 @@ class ExperimentController extends BaseController
         }
 
         if(Config::get('pga_config.airavata')["data-sharing-enabled"]){
-            if (SharingUtilities::userCanWrite(Session::get("username"), Input::get('expId'), ResourceType::EXPERIMENT)) {
+            if (SharingUtilities::userCanWrite(Session::get("username"), Input::get('expId'))) {
                 if (isset($_POST['save']) || isset($_POST['launch'])) {
 
                     ExperimentUtilities::update_experiment($experiment->experimentId, $updatedExperiment);
@@ -459,7 +482,7 @@ class ExperimentController extends BaseController
         );
 
         $queues = ExperimentUtilities::getQueueDatafromResourceId($computeResourceId);
-        $userComputeResourcePreferences = URPUtilities::get_all_user_compute_resource_prefs();
+        $userComputeResourcePreferences = URPUtilities::get_all_validated_user_compute_resource_prefs();
         $userHasComputeResourcePreference = array_key_exists($computeResourceId, $userComputeResourcePreferences);
         if ($userHasComputeResourcePreference)
         {
@@ -519,7 +542,7 @@ class ExperimentController extends BaseController
         foreach ($expContainer as $experiment) {
             if(Config::get('pga_config.airavata')["data-sharing-enabled"]){
                 $can_write[$experiment['experiment']->experimentId] = SharingUtilities::userCanWrite(Session::get("username"),
-                    $experiment['experiment']->experimentId, ResourceType::EXPERIMENT);
+                    $experiment['experiment']->experimentId);
             } else {
                 $can_write[$experiment['experiment']->experimentId] = true;
             }
@@ -545,7 +568,7 @@ class ExperimentController extends BaseController
     public function sharedUsers()
     {
         if (Session::has("authz-token") && array_key_exists('resourceId', $_GET)) {
-            return Response::json(SharingUtilities::getProfilesForSharedUsers($_GET['resourceId'], ResourceType::EXPERIMENT));
+            return Response::json(SharingUtilities::getProfilesForSharedUsers($_GET['resourceId']));
         }
         else {
             return Response::json(array("error" => "Error: No project specified"));
@@ -555,7 +578,7 @@ class ExperimentController extends BaseController
     public function unsharedUsers()
     {
         if (Session::has("authz-token") && array_key_exists('resourceId', $_GET)) {
-            return Response::json(SharingUtilities::getProfilesForUnsharedUsers($_GET['resourceId'], ResourceType::EXPERIMENT));
+            return Response::json(SharingUtilities::getProfilesForUnsharedUsers($_GET['resourceId']));
         }
         else {
             return Response::json(array("error" => "Error: No experiment specified"));
@@ -589,6 +612,21 @@ class ExperimentController extends BaseController
             $allowedFileSize = $serverLimit;
         }
         return $allowedFileSize;
+    }
+
+    private function validateQueueData($computeResourceId, $queue)
+    {
+        $queues = ExperimentUtilities::getQueueDatafromResourceId($computeResourceId);
+        $queueName = $queue['queueName'];
+
+        foreach($queues as $aQueue){
+            if($aQueue->queueName == $queueName) {
+                if($queue['nodeCount'] <= $aQueue->maxNodes && $queue['cpuCount'] <= $aQueue->maxProcessors && $queue['wallTimeLimit'] <= $aQueue->maxRunTime)
+                    return true;
+            }
+        }
+
+        return false;
     }
 }
 
